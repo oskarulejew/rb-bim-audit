@@ -10,6 +10,7 @@ from bim_audit_qc.audit_engine import run_audit
 from bim_audit_qc.ai_review import review_findings
 from bim_audit_qc.report import merge_final, write_report, final_decision
 from bim_audit_qc.user_rules import UserRules, create_templates
+from bim_audit_qc.rag import ReferenceRAG
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
@@ -67,6 +68,15 @@ TEMP_DIR.mkdir(exist_ok=True)
 REPORT_DIR.mkdir(exist_ok=True)
 RULES_DIR.mkdir(exist_ok=True)
 create_templates(RULES_DIR)
+RAG_CACHE_DIR = BASE / '.rag_cache'
+
+
+@st.cache_resource(show_spinner=False)
+def _load_rag(ref_dirs_key: tuple, api_key: str) -> ReferenceRAG:
+    rag = ReferenceRAG()
+    if api_key:
+        rag.build(list(ref_dirs_key), api_key, cache_dir=RAG_CACHE_DIR)
+    return rag
 
 
 def safe_display(df: pd.DataFrame) -> pd.DataFrame:
@@ -236,6 +246,14 @@ if run:
         refs = ReferenceLibrary(ref_dirs)
         user_rules = UserRules(RULES_DIR) if use_user_rules else None
         selected, detected = detect_files(paths)
+
+    rag = None
+    if use_ai and api_key:
+        with st.spinner('Loading RAG index from reference documents (cached after first run)...'):
+            rag = _load_rag(tuple(str(d) for d in ref_dirs), api_key.strip())
+        if rag.ready:
+            s = rag.stats()
+            st.success(f"RAG index ready — {s['chunks_indexed']:,} chunks from {s['reference_files_indexed']} reference files.")
         if len(model_uploads or []) == 1:
             selected['model'] = str(model_dir / model_uploads[0].name)
         if qty_uploads:
@@ -295,8 +313,8 @@ if run:
     st.write(f'{len(flags)} raw flags before reasoning review')
     st.dataframe(safe_display(flags.head(300)), width='stretch')
 
-    with st.spinner('Running AI/local reasoning review...'):
-        reviews = review_findings(flags, use_ai=use_ai, api_key=api_key.strip() or None, model=model)
+    with st.spinner('Running AI reasoning review with RAG reference context...' if (use_ai and rag and rag.ready) else 'Running local reasoning review...'):
+        reviews = review_findings(flags, use_ai=use_ai, api_key=api_key.strip() or None, model=model, rag=rag)
         final = merge_final(flags, reviews)
         if use_user_rules and user_rules is not None:
             final = user_rules.apply(final)
