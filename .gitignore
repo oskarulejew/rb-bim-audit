@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# Temp uploads and generated reports (user data, never commit)
+temp_uploads/
+reports/
+
+# Project-specific override rules (may contain client data)
+project_rules/*.xlsx
+project_rules/*.xlsm
+project_rules/*.csv
+# Keep the auto-generated templates
+!project_rules/false_positive_rules_TEMPLATE.xlsx
+!project_rules/accepted_patterns_TEMPLATE.xlsx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
