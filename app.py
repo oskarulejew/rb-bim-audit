@@ -26,12 +26,12 @@ def _get_secret(key: str, default: str = '') -> str:
 
 def _check_access(email: str, code: str) -> bool:
     raw_codes = _get_secret('ACCESS_CODES', '')
-    if not raw_codes:
-        return True  # no gate configured — open access
-    allowed_codes = {c.strip().lower() for c in raw_codes.split(',') if c.strip()}
+    if not raw_codes.strip():
+        return False  # no codes configured — deny everyone until secrets are set
+    allowed_codes = {c.strip() for c in raw_codes.split(',') if c.strip()}
     raw_emails = _get_secret('ALLOWED_EMAILS', '')
     allowed_emails = {e.strip().lower() for e in raw_emails.split(',') if e.strip()}
-    code_ok = code.strip().lower() in allowed_codes
+    code_ok = code.strip() in allowed_codes  # case-sensitive
     email_ok = (not allowed_emails) or (email.strip().lower() in allowed_emails)
     return code_ok and email_ok
 
@@ -52,7 +52,7 @@ def _access_gate():
             st.session_state['user_email'] = email.strip().lower()
             st.rerun()
         else:
-            st.error('Incorrect access code or email address not authorised. Contact your administrator.')
+            st.error('Incorrect access code. Contact your administrator.')
     st.stop()
 
 
