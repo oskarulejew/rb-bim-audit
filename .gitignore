@@ -15,6 +15,9 @@ project_rules/*.csv
 !project_rules/false_positive_rules_TEMPLATE.xlsx
 !project_rules/accepted_patterns_TEMPLATE.xlsx
 
+# Streamlit secrets (never commit real keys)
+.streamlit/secrets.toml
+
 # OS
 .DS_Store
 Thumbs.db

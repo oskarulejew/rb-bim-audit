@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, uuid, shutil, warnings, re
+import os, uuid, shutil, warnings, re, hashlib
 from pathlib import Path
 import pandas as pd
 import streamlit as st
@@ -12,6 +12,51 @@ from bim_audit_qc.report import merge_final, write_report, final_decision
 from bim_audit_qc.user_rules import UserRules, create_templates
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+
+
+# ---------------------------------------------------------------------------
+# Access gate
+# ---------------------------------------------------------------------------
+def _get_secret(key: str, default: str = '') -> str:
+    try:
+        return st.secrets.get(key, default) or default
+    except Exception:
+        return os.environ.get(key, default)
+
+
+def _check_access(email: str, code: str) -> bool:
+    raw_codes = _get_secret('ACCESS_CODES', '')
+    if not raw_codes:
+        return True  # no gate configured — open access
+    allowed_codes = {c.strip().lower() for c in raw_codes.split(',') if c.strip()}
+    raw_emails = _get_secret('ALLOWED_EMAILS', '')
+    allowed_emails = {e.strip().lower() for e in raw_emails.split(',') if e.strip()}
+    code_ok = code.strip().lower() in allowed_codes
+    email_ok = (not allowed_emails) or (email.strip().lower() in allowed_emails)
+    return code_ok and email_ok
+
+
+def _access_gate():
+    if st.session_state.get('authenticated'):
+        return
+    st.set_page_config(page_title='Rail Baltica BIM Audit — Login', layout='centered')
+    st.title('Rail Baltica BIM Forensic Audit')
+    st.markdown('Enter your email address and the access code provided by your administrator.')
+    with st.form('login_form'):
+        email = st.text_input('Email address')
+        code = st.text_input('Access code', type='password')
+        submitted = st.form_submit_button('Sign in', type='primary')
+    if submitted:
+        if _check_access(email, code):
+            st.session_state['authenticated'] = True
+            st.session_state['user_email'] = email.strip().lower()
+            st.rerun()
+        else:
+            st.error('Incorrect access code or email address not authorised. Contact your administrator.')
+    st.stop()
+
+
+_access_gate()
 
 BASE = Path(__file__).parent
 REF_DIR = BASE / 'references'
@@ -83,8 +128,16 @@ st.set_page_config(page_title='Rail Baltica BIM Forensic AI QA/QC v9', layout='w
 st.title('Rail Baltica BIM Forensic AI-assisted QA/QC — v9')
 st.caption('V9 forensic logic: structural validation + element-level qty checks + column mapping docs + Dataset_Sanity sheet + controlled feedback learning')
 
+_preconfigured_key = _get_secret('OPENAI_API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
+
 with st.sidebar:
     st.header('Audit settings')
+    if st.session_state.get('user_email'):
+        st.caption(f'Signed in as {st.session_state["user_email"]}')
+        if st.button('Sign out', use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+    st.markdown('---')
     discipline = st.selectbox(
         'Scope handling',
         ['AUTO_MIXED','STR','AR','DR','RO','BR','GE','EL','ME','TP','IA','IW','ED','FI','CO','LA','UD'],
@@ -93,10 +146,16 @@ with st.sidebar:
     )
     st.markdown('---')
     st.subheader('AI reasoning')
-    use_ai = st.checkbox('Use OpenAI API for reasoning review', value=False)
-    api_key = st.text_input('OpenAI API key', type='password', value=os.environ.get('OPENAI_API_KEY',''))
-    model = st.text_input('AI model', value='gpt-4.1-mini')
-    st.caption('Without an API key, the app uses a conservative local reasoning layer. AI is used as a reviewer, not as the primary calculator.')
+    if _preconfigured_key:
+        use_ai = st.checkbox('Use AI reasoning review', value=True)
+        api_key = _preconfigured_key
+        model = 'gpt-4.1-mini'
+        st.caption('OpenAI API key is pre-configured by the administrator.')
+    else:
+        use_ai = st.checkbox('Use OpenAI API for reasoning review', value=False)
+        api_key = st.text_input('OpenAI API key', type='password')
+        model = st.text_input('AI model', value='gpt-4.1-mini')
+        st.caption('Without an API key the app uses a conservative local reasoning layer.')
     st.markdown('---')
     st.subheader('Controlled learning')
     use_user_rules = st.checkbox('Apply user-confirmed project rules', value=True)
