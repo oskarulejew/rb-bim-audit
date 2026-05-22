@@ -216,50 +216,85 @@ def write_report(out_path, flags, reviews, final, limitations, detected, ref_sta
         qty_control.to_excel(writer, sheet_name='Quantity_Control', index=False)
 
         wb = writer.book
-        header_fmt = wb.add_format({'bold': True, 'bg_color': '#D9EAF7', 'border': 1, 'text_wrap': True})
-        red_fmt = wb.add_format({'bg_color': '#F4CCCC'})
-        yellow_fmt = wb.add_format({'bg_color': '#FFF2CC'})
-        green_fmt = wb.add_format({'bg_color': '#D9EAD3'})
-        grey_fmt = wb.add_format({'bg_color': '#E7E6E6'})
-        text_fmt = wb.add_format({'text_wrap': True, 'valign': 'top'})
-        num_fmt = wb.add_format({'num_format': '0.000', 'valign': 'top'})
 
-        for sname, ws in writer.sheets.items():
+        # ── Formats ──────────────────────────────────────────────────────────
+        # header_fmt uses dark navy + white text (matches app theme #1F5096).
+        # NOTE: set_row() cannot override cells already written by pandas — we
+        # must re-write each header cell explicitly after to_excel().
+        header_fmt = wb.add_format({
+            'bold': True, 'font_name': 'Arial', 'font_size': 10,
+            'bg_color': '#1F5096', 'font_color': '#FFFFFF',
+            'border': 1, 'text_wrap': True, 'valign': 'vcenter',
+        })
+        red_fmt    = wb.add_format({'bg_color': '#F4CCCC', 'font_name': 'Arial', 'font_size': 9})
+        yellow_fmt = wb.add_format({'bg_color': '#FFF2CC', 'font_name': 'Arial', 'font_size': 9})
+        green_fmt  = wb.add_format({'bg_color': '#D9EAD3', 'font_name': 'Arial', 'font_size': 9})
+        grey_fmt   = wb.add_format({'bg_color': '#E7E6E6', 'font_name': 'Arial', 'font_size': 9})
+        text_fmt   = wb.add_format({'text_wrap': True, 'valign': 'top', 'font_name': 'Arial', 'font_size': 9})
+        num_fmt    = wb.add_format({'num_format': '0.000', 'valign': 'top', 'font_name': 'Arial', 'font_size': 9})
+
+        # ── Per-sheet layout ──────────────────────────────────────────────────
+        # Map sheet name → (DataFrame, col-width spec callable)
+        sheet_specs = {
+            'Model_Original':    model_df,
+            'Model_With_Errors': model_df,
+            'Errors_Filterable': errors,
+            'Quantity_Control':  qty_control,
+        }
+
+        for sname, df_data in sheet_specs.items():
+            ws = writer.sheets[sname]
+            n_rows = len(df_data)
+            n_cols = max(1, len(df_data.columns))
+
+            # Re-write every header cell so the bold/navy format actually applies.
+            # set_row() alone is insufficient because it cannot override cells
+            # that pandas already wrote with a default cell format.
+            ws.set_row(0, 36)
+            for ci, col_name in enumerate(df_data.columns):
+                ws.write(0, ci, col_name, header_fmt)
+
             ws.freeze_panes(1, 0)
-            max_col = 25 if sname.startswith('Model') else 12
-            try:
-                ws.autofilter(0, 0, max(1, len(model_df) if sname.startswith('Model') else 1), max_col)
-            except Exception:
-                pass
-            ws.set_row(0, 28, header_fmt)
+            # autofilter must cover the actual row count of THIS sheet's data
+            ws.autofilter(0, 0, n_rows, n_cols - 1)
+
             if sname.startswith('Model'):
-                ws.set_column(0, min(max_col, max(0, len(model_df.columns)-1)), 18, text_fmt)
+                ws.set_column(0, n_cols - 1, 18, text_fmt)
             elif sname == 'Errors_Filterable':
-                ws.set_column(0, 0, 14, text_fmt)
-                ws.set_column(1, 1, 24, text_fmt)
-                ws.set_column(2, 2, 14, text_fmt)
-                ws.set_column(3, 5, 24, text_fmt)
-                ws.set_column(6, 6, 18, text_fmt)
-                ws.set_column(7, 8, 58, text_fmt)
+                ws.set_column(0, 0, 14, text_fmt)   # Source_Row
+                ws.set_column(1, 1, 28, text_fmt)   # ObjectID
+                ws.set_column(2, 2, 16, text_fmt)   # Element_Class
+                ws.set_column(3, 3, 26, text_fmt)   # Attribute
+                ws.set_column(4, 4, 26, text_fmt)   # Model_Value
+                ws.set_column(5, 5, 34, text_fmt)   # Requirement
+                ws.set_column(6, 6, 18, text_fmt)   # Severity
+                ws.set_column(7, 7, 64, text_fmt)   # Explanation
+                ws.set_column(8, 8, 50, text_fmt)   # Cross-check
+                # Taller default row height so wrapped text in long cells is visible
+                ws.set_default_row(52)
             elif sname == 'Quantity_Control':
                 ws.set_column(0, 2, 22, text_fmt)
                 ws.set_column(3, 7, 16, num_fmt)
                 ws.set_column(8, 8, 16, text_fmt)
                 ws.set_column(9, 9, 58, text_fmt)
 
-        # Conditional formatting
-        err_ws = writer.sheets['Errors_Filterable']
-        err_ws.conditional_format(1, 0, max(1, len(errors)), 8, {'type':'text','criteria':'containing','value':'CRITICAL ERROR','format': red_fmt})
-        err_ws.conditional_format(1, 0, max(1, len(errors)), 8, {'type':'text','criteria':'containing','value':'SYSTEMIC ERROR','format': red_fmt})
-        err_ws.conditional_format(1, 0, max(1, len(errors)), 8, {'type':'text','criteria':'containing','value':'ERROR','format': red_fmt})
-        err_ws.conditional_format(1, 0, max(1, len(errors)), 8, {'type':'text','criteria':'containing','value':'WARNING','format': yellow_fmt})
-        err_ws.conditional_format(1, 0, max(1, len(errors)), 8, {'type':'text','criteria':'containing','value':'LIMITATION','format': yellow_fmt})
-        err_ws.conditional_format(1, 0, max(1, len(errors)), 8, {'type':'text','criteria':'containing','value':'INFO','format': grey_fmt})
+        # ── Conditional formatting ────────────────────────────────────────────
+        err_ws  = writer.sheets['Errors_Filterable']
+        n_err   = max(1, len(errors))
+        # Most-specific statuses first so Excel priority works correctly
+        err_ws.conditional_format(1, 0, n_err, 8, {'type':'text','criteria':'containing','value':'CRITICAL ERROR', 'format': red_fmt})
+        err_ws.conditional_format(1, 0, n_err, 8, {'type':'text','criteria':'containing','value':'SYSTEMIC ERROR', 'format': red_fmt})
+        err_ws.conditional_format(1, 0, n_err, 8, {'type':'text','criteria':'containing','value':'ERROR',         'format': red_fmt})
+        err_ws.conditional_format(1, 0, n_err, 8, {'type':'text','criteria':'containing','value':'MANUAL_REVIEW', 'format': yellow_fmt})
+        err_ws.conditional_format(1, 0, n_err, 8, {'type':'text','criteria':'containing','value':'LIMITATION',    'format': yellow_fmt})
+        err_ws.conditional_format(1, 0, n_err, 8, {'type':'text','criteria':'containing','value':'WARNING',       'format': yellow_fmt})
+        err_ws.conditional_format(1, 0, n_err, 8, {'type':'text','criteria':'containing','value':'INFO',          'format': grey_fmt})
 
         qty_ws = writer.sheets['Quantity_Control']
-        qty_ws.conditional_format(1, 0, max(1, len(qty_control)), 9, {'type':'text','criteria':'containing','value':'ERROR','format': red_fmt})
-        qty_ws.conditional_format(1, 0, max(1, len(qty_control)), 9, {'type':'text','criteria':'containing','value':'LIMITATION','format': yellow_fmt})
-        qty_ws.conditional_format(1, 0, max(1, len(qty_control)), 9, {'type':'text','criteria':'containing','value':'OK','format': green_fmt})
+        n_qty  = max(1, len(qty_control))
+        qty_ws.conditional_format(1, 0, n_qty, 9, {'type':'text','criteria':'containing','value':'ERROR',     'format': red_fmt})
+        qty_ws.conditional_format(1, 0, n_qty, 9, {'type':'text','criteria':'containing','value':'LIMITATION','format': yellow_fmt})
+        qty_ws.conditional_format(1, 0, n_qty, 9, {'type':'text','criteria':'containing','value':'OK',        'format': green_fmt})
 
         _apply_model_comments(writer.sheets['Model_With_Errors'], wb, model_df, final_kept)
         _write_dataset_sanity_sheet(writer, detected, col_mappings, ref_stats, limitations)
