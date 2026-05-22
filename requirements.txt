@@ -5,3 +5,4 @@ openpyxl>=3.1
 xlsxwriter>=3.2
 rapidfuzz>=3.9
 openai>=1.50
+google-generativeai>=0.8

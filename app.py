@@ -72,10 +72,10 @@ RAG_CACHE_DIR = BASE / '.rag_cache'
 
 
 @st.cache_resource(show_spinner=False)
-def _load_rag(ref_dirs_key: tuple, api_key: str) -> ReferenceRAG:
+def _load_rag(ref_dirs_key: tuple, api_key: str, provider: str) -> ReferenceRAG:
     rag = ReferenceRAG()
     if api_key:
-        rag.build(list(ref_dirs_key), api_key, cache_dir=RAG_CACHE_DIR)
+        rag.build(list(ref_dirs_key), api_key, provider=provider, cache_dir=RAG_CACHE_DIR)
     return rag
 
 
@@ -138,7 +138,8 @@ st.set_page_config(page_title='Rail Baltica BIM Forensic AI QA/QC v9', layout='w
 st.title('Rail Baltica BIM Forensic AI-assisted QA/QC — v9')
 st.caption('V9 forensic logic: structural validation + element-level qty checks + column mapping docs + Dataset_Sanity sheet + controlled feedback learning')
 
-_preconfigured_key = _get_secret('OPENAI_API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
+_google_key  = _get_secret('GOOGLE_API_KEY',  '') or os.environ.get('GOOGLE_API_KEY',  '')
+_openai_key  = _get_secret('OPENAI_API_KEY',  '') or os.environ.get('OPENAI_API_KEY',  '')
 
 with st.sidebar:
     st.header('Audit settings')
@@ -156,16 +157,42 @@ with st.sidebar:
     )
     st.markdown('---')
     st.subheader('AI reasoning')
-    if _preconfigured_key:
-        use_ai = st.checkbox('Use AI reasoning review', value=True)
-        api_key = _preconfigured_key
-        model = 'gpt-4.1-mini'
-        st.caption('OpenAI API key is pre-configured by the administrator.')
+    _has_any_key = bool(_google_key or _openai_key)
+    use_ai = st.checkbox('Use AI reasoning review', value=_has_any_key)
+
+    if use_ai:
+        # Build provider list — pre-configured ones come first
+        _provider_opts = []
+        if _google_key:
+            _provider_opts.append('Google Gemini (free)')
+        if _openai_key:
+            _provider_opts.append('OpenAI')
+        if not _provider_opts:
+            _provider_opts = ['Google Gemini (free)', 'OpenAI']
+        ai_provider_label = st.selectbox('Provider', _provider_opts)
+
+        if 'Gemini' in ai_provider_label:
+            ai_provider = 'google'
+            model = 'gemini-2.0-flash'
+            if _google_key:
+                api_key = _google_key
+                st.caption('✅ Google Gemini free tier — pre-configured.')
+            else:
+                api_key = st.text_input('Google API key', type='password',
+                                        help='Free at aistudio.google.com/app/apikey')
+                st.caption('Free tier: 1 M tokens / day · 15 req / min · no credit card needed.')
+        else:
+            ai_provider = 'openai'
+            if _openai_key:
+                api_key = _openai_key
+                model = st.selectbox('Model', ['gpt-4.1-mini', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4o'], index=0)
+                st.caption('✅ OpenAI — pre-configured.')
+            else:
+                api_key = st.text_input('OpenAI API key', type='password')
+                model = st.selectbox('Model', ['gpt-4.1-mini', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4o'], index=0)
     else:
-        use_ai = st.checkbox('Use OpenAI API for reasoning review', value=False)
-        api_key = st.text_input('OpenAI API key', type='password')
-        model = st.text_input('AI model', value='gpt-4.1-mini')
-        st.caption('Without an API key the app uses a conservative local reasoning layer.')
+        api_key, model, ai_provider = '', 'gemini-2.0-flash', 'google'
+        st.caption('Running local heuristic review — no API needed.')
     st.markdown('---')
     st.subheader('Controlled learning')
     use_user_rules = st.checkbox('Apply user-confirmed project rules', value=True)
@@ -250,7 +277,7 @@ if run:
     rag = None
     if use_ai and api_key:
         with st.spinner('Loading RAG index from reference documents (cached after first run)...'):
-            rag = _load_rag(tuple(str(d) for d in ref_dirs), api_key.strip())
+            rag = _load_rag(tuple(str(d) for d in ref_dirs), api_key.strip(), ai_provider)
         if rag.ready:
             s = rag.stats()
             st.success(f"RAG index ready — {s['chunks_indexed']:,} chunks from {s['reference_files_indexed']} reference files.")
@@ -314,7 +341,7 @@ if run:
     st.dataframe(safe_display(flags.head(300)), width='stretch')
 
     with st.spinner('Running AI reasoning review with RAG reference context...' if (use_ai and rag and rag.ready) else 'Running local reasoning review...'):
-        reviews = review_findings(flags, use_ai=use_ai, api_key=api_key.strip() or None, model=model, rag=rag)
+        reviews = review_findings(flags, use_ai=use_ai, api_key=api_key.strip() or None, model=model, rag=rag, provider=ai_provider)
         final = merge_final(flags, reviews)
         if use_user_rules and user_rules is not None:
             final = user_rules.apply(final)

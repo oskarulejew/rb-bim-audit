@@ -23,11 +23,11 @@ Return only JSON matching the schema.
 
 RAG_SYSTEM_PROMPT = """
 You are a Rail Baltica BIM information QA/QC reviewer performing an ultra-forensic audit review.
-Each flag includes REFERENCE CONTEXT — rows retrieved from the official Rail Baltica BIM standard
+Each flag includes REFERENCE_CONTEXT — rows retrieved from the official Rail Baltica BIM standard
 documents (LOI matrices, ObjectID matrices, Uniclass tables, naming conventions, kontrolltabel).
 
 Decision rules:
-- Use the REFERENCE CONTEXT to verify or refute the flag. Always cite the source file in your reasoning.
+- Use the REFERENCE_CONTEXT to verify or refute the flag. Always cite the source file in your reasoning.
 - Do not invent requirements not present in the provided reference context.
 - Keep definite findings as ERROR or CRITICAL ERROR: missing Object_ID, duplicate Object_ID,
   invalid format, missing mandatory LOI 400 attribute, missing core value, non-numeric quantity,
@@ -35,14 +35,24 @@ Decision rules:
 - Mixed-discipline extracts are normal in AUTO_MIXED mode. Do not flag mixed disciplines.
 - If the reference context does not cover the specific case, use LIMITATION or MANUAL_REVIEW.
 - SYSTEMIC ERROR when the same problem pattern affects many rows.
-- CRS comments must cite the specific reference source from the context.
-  Format: "Mistake: X\\nExplanation: Y\\nCross-check: [cite exact source from reference context]"
+- CRS comments must cite the specific source file from REFERENCE_CONTEXT.
+  Format: "Mistake: X\\nExplanation: Y\\nCross-check: [cite exact source file from context]"
 Return only JSON matching the schema.
 """
 
+_SCHEMA_HINT = (
+    'Return a JSON object with a single key "reviews" containing an array. '
+    'Each item must have exactly these fields: '
+    'rule_id (string), row_index (string), element (string), attribute (string), '
+    'final_status (one of: OK / WARNING / ERROR / SYSTEMIC ERROR / CRITICAL ERROR / LIMITATION / MANUAL_REVIEW / INFO), '
+    'action (one of: KEEP / MODIFY / SUPPRESS), '
+    'confidence (number between 0 and 1), '
+    'reasoning_summary (string), '
+    'crs_comment (string formatted as "Mistake: ...\\nExplanation: ...\\nCross-check: ...").'
+)
+
 SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
+    "type": "object", "additionalProperties": False,
     "properties": {"reviews": {"type": "array", "items": {
         "type": "object", "additionalProperties": False,
         "properties": {
@@ -50,7 +60,7 @@ SCHEMA = {
             "element": {"type": "string"}, "attribute": {"type": "string"},
             "final_status": {"type": "string", "enum": [
                 "OK", "WARNING", "ERROR", "SYSTEMIC ERROR", "CRITICAL ERROR",
-                "LIMITATION", "MANUAL_REVIEW", "INFO"
+                "LIMITATION", "MANUAL_REVIEW", "INFO",
             ]},
             "action": {"type": "string", "enum": ["KEEP", "MODIFY", "SUPPRESS"]},
             "confidence": {"type": "number"},
@@ -63,7 +73,7 @@ SCHEMA = {
     "required": ["reviews"],
 }
 
-# ── Rule sets for heuristic pass ─────────────────────────────────────────────
+# ── Rule sets ─────────────────────────────────────────────────────────────────
 
 SUPPRESS_INFO = {'OBJ_DISCIPLINE_SCOPE_INFO'}
 DEFINITE_CRITICAL = {
@@ -105,21 +115,20 @@ def _rag_query(r: pd.Series) -> str:
     return ' '.join(p for p in parts if p and p.lower() not in {'nan', 'none', ''})
 
 
-def _enrich_with_rag(flags: pd.DataFrame, rag, api_key: str) -> list[dict]:
+def _enrich_with_rag(flags: pd.DataFrame, rag) -> list[dict]:
     query_cache: dict[str, list] = {}
     payload = []
     for _, r in flags.iterrows():
         query = _rag_query(r)
         if query not in query_cache:
-            query_cache[query] = rag.retrieve(query, api_key, k=4)
+            query_cache[query] = rag.retrieve(query, k=6)
         ctx = query_cache[query]
-        if ctx:
-            ctx_text = '\n'.join(
+        ctx_text = (
+            '\n'.join(
                 f"  [{i+1}] (source: {c['source']}, relevance: {c['score']:.2f})\n      {c['text']}"
                 for i, c in enumerate(ctx)
-            )
-        else:
-            ctx_text = '  No relevant reference entry found for this flag.'
+            ) if ctx else '  No matching reference entry found.'
+        )
         payload.append({
             'rule_id': str(r.get('rule_id', '')),
             'tier': str(r.get('tier', '')),
@@ -137,9 +146,9 @@ def _enrich_with_rag(flags: pd.DataFrame, rag, api_key: str) -> list[dict]:
 
 
 def _plain_payload(flags: pd.DataFrame, max_items: int) -> list[dict]:
-    payload = []
+    rows = []
     for _, r in flags.head(max_items).iterrows():
-        payload.append({
+        rows.append({
             'rule_id': str(r.get('rule_id', '')), 'tier': str(r.get('tier', '')),
             'severity': str(r.get('severity', '')), 'row_index': str(r.get('row_index', '')),
             'element': str(r.get('element', '')), 'attribute': str(r.get('attribute', '')),
@@ -148,9 +157,25 @@ def _plain_payload(flags: pd.DataFrame, max_items: int) -> list[dict]:
             'message': str(r.get('message', ''))[:500],
             'cross_check': str(r.get('cross_check', '')),
         })
-    return payload
+    return rows
 
-# ── Review functions ──────────────────────────────────────────────────────────
+
+def _merge_ai_into_base(base: pd.DataFrame, ai: pd.DataFrame) -> pd.DataFrame:
+    if ai.empty:
+        return base
+    keys = ['rule_id', 'row_index', 'element', 'attribute']
+    for c in keys:
+        base[c] = base[c].astype(str)
+        ai[c] = ai[c].astype(str)
+    merged = base.merge(ai, on=keys, how='left', suffixes=('', '_ai'))
+    for c in ['final_status', 'action', 'confidence', 'reasoning_summary', 'crs_comment']:
+        col_ai = f'{c}_ai'
+        if col_ai in merged.columns:
+            merged[c] = merged[col_ai].combine_first(merged[c])
+    return merged[['rule_id', 'row_index', 'element', 'attribute',
+                   'final_status', 'action', 'confidence', 'reasoning_summary', 'crs_comment']]
+
+# ── Heuristic review (no API) ─────────────────────────────────────────────────
 
 
 def heuristic_review(flags: pd.DataFrame) -> pd.DataFrame:
@@ -163,7 +188,7 @@ def heuristic_review(flags: pd.DataFrame) -> pd.DataFrame:
         sev = str(r.get('severity', 'WARNING'))
         if rid in SUPPRESS_INFO or sev == 'INFO':
             status, action, conf = 'INFO', 'SUPPRESS', 0.95
-            summary = 'Suppressed as informational scope metadata. Mixed discipline extracts are allowed.'
+            summary = 'Suppressed: informational scope metadata. Mixed discipline extracts are allowed.'
         elif rid in DEFINITE_CRITICAL or sev == 'CRITICAL ERROR':
             status, action, conf = 'CRITICAL ERROR', 'KEEP', 0.95
             summary = str(r.get('message', ''))
@@ -191,6 +216,8 @@ def heuristic_review(flags: pd.DataFrame) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
+# ── OpenAI review ─────────────────────────────────────────────────────────────
+
 
 def openai_review(flags: pd.DataFrame, api_key: str, model: str = 'gpt-4.1-mini',
                   max_items: int = 120, rag=None) -> pd.DataFrame:
@@ -203,57 +230,95 @@ def openai_review(flags: pd.DataFrame, api_key: str, model: str = 'gpt-4.1-mini'
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
-
         use_rag = rag is not None and rag.ready
         if use_rag:
-            enriched = _enrich_with_rag(uncertain, rag, api_key)
+            payload = _enrich_with_rag(uncertain, rag)
             user_prompt = (
-                'Review the BIM audit flags below. Each includes REFERENCE_CONTEXT from official '
+                'Review the BIM audit flags. Each includes REFERENCE_CONTEXT from official '
                 'Rail Baltica BIM documents. Cite the source in every crs_comment.\n'
-                + json.dumps(enriched, ensure_ascii=False)
+                + json.dumps(payload, ensure_ascii=False)
             )
             system = RAG_SYSTEM_PROMPT
         else:
-            user_prompt = (
-                'Review these BIM audit rule flags and return final decisions.\n'
-                + json.dumps(_plain_payload(uncertain, max_items), ensure_ascii=False)
-            )
+            user_prompt = ('Review these BIM audit flags and return final decisions.\n'
+                           + json.dumps(_plain_payload(uncertain, max_items), ensure_ascii=False))
             system = SYSTEM_PROMPT
-
         try:
             resp = client.responses.create(
                 model=model,
-                input=[{"role": "system", "content": system}, {"role": "user", "content": user_prompt}],
-                text={"format": {"type": "json_schema", "name": "bim_audit_reviews", "strict": True, "schema": SCHEMA}},
+                input=[{"role": "system", "content": system},
+                       {"role": "user", "content": user_prompt}],
+                text={"format": {"type": "json_schema", "name": "bim_audit_reviews",
+                                 "strict": True, "schema": SCHEMA}},
             )
             data = json.loads(resp.output_text)
         except Exception:
             resp = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user_prompt}],
+                messages=[{"role": "system", "content": system},
+                           {"role": "user", "content": user_prompt}],
                 response_format={"type": "json_object"},
             )
             data = json.loads(resp.choices[0].message.content)
-
-        ai = pd.DataFrame(data.get('reviews', []))
-        if ai.empty:
-            return base
-        keys = ['rule_id', 'row_index', 'element', 'attribute']
-        for c in keys:
-            base[c] = base[c].astype(str)
-            ai[c] = ai[c].astype(str)
-        merged = base.merge(ai, on=keys, how='left', suffixes=('', '_ai'))
-        for c in ['final_status', 'action', 'confidence', 'reasoning_summary', 'crs_comment']:
-            if f'{c}_ai' in merged.columns:
-                merged[c] = merged[f'{c}_ai'].combine_first(merged[c])
-        return merged[['rule_id', 'row_index', 'element', 'attribute',
-                        'final_status', 'action', 'confidence', 'reasoning_summary', 'crs_comment']]
+        return _merge_ai_into_base(base, pd.DataFrame(data.get('reviews', [])))
     except Exception:
         return base
 
+# ── Google Gemini review (free tier) ─────────────────────────────────────────
+
+
+def gemini_review(flags: pd.DataFrame, api_key: str, model: str = 'gemini-2.0-flash',
+                  max_items: int = 120, rag=None) -> pd.DataFrame:
+    if flags is None or flags.empty:
+        return pd.DataFrame()
+    base = heuristic_review(flags)
+    uncertain = flags[~flags['rule_id'].isin(SUPPRESS_INFO | DEFINITE_CRITICAL)].head(max_items).copy()
+    if uncertain.empty:
+        return base
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        use_rag = rag is not None and rag.ready
+        if use_rag:
+            payload = _enrich_with_rag(uncertain, rag)
+            user_prompt = (
+                'Review the BIM audit flags. Each includes REFERENCE_CONTEXT from official '
+                'Rail Baltica BIM documents. Cite the source in every crs_comment.\n'
+                + _SCHEMA_HINT + '\n'
+                + json.dumps(payload, ensure_ascii=False)
+            )
+            system = RAG_SYSTEM_PROMPT
+        else:
+            user_prompt = (
+                'Review these BIM audit flags and return final decisions.\n'
+                + _SCHEMA_HINT + '\n'
+                + json.dumps(_plain_payload(uncertain, max_items), ensure_ascii=False)
+            )
+            system = SYSTEM_PROMPT
+        gemini_model = genai.GenerativeModel(
+            model_name=model,
+            system_instruction=system,
+            generation_config=genai.GenerationConfig(response_mime_type='application/json'),
+        )
+        response = gemini_model.generate_content(user_prompt)
+        raw = response.text.strip()
+        # Strip markdown code fences if present
+        if raw.startswith('```'):
+            raw = raw.split('```')[1]
+            if raw.startswith('json'):
+                raw = raw[4:]
+        data = json.loads(raw)
+        return _merge_ai_into_base(base, pd.DataFrame(data.get('reviews', [])))
+    except Exception:
+        return base
+
+# ── Dispatcher ────────────────────────────────────────────────────────────────
+
 
 def review_findings(flags: pd.DataFrame, use_ai: bool, api_key: str | None,
-                    model: str, rag=None) -> pd.DataFrame:
+                    model: str, rag=None, provider: str = 'openai') -> pd.DataFrame:
     if use_ai and api_key:
+        if provider.lower() in {'google', 'gemini', 'google gemini'}:
+            return gemini_review(flags, api_key, model=model, rag=rag)
         return openai_review(flags, api_key, model=model, rag=rag)
     return heuristic_review(flags)
